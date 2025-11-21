@@ -50,7 +50,7 @@ const UnverifiedPage = () => {
             Your account has been successfully verified. You can now access all features.
           </p>
           <button
-            onClick={() => navigate('/')} // Navigate to mechanic dashboard
+           onClick={() => window.location.href = '/'}// Navigate to mechanic dashboard
             className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md transition"
           >
             Go to Dashboard

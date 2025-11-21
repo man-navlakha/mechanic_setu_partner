@@ -28,6 +28,7 @@ export const WebSocketProvider = ({ children }) => {
   const [job, setJob] = useState(null);
   const [mechanicCoords, setMechanicCoords] = useState(null);
   const jobRef = useRef(null);
+  const [isInitialized, setIsInitialized] = useState(false);
   const lastClearedJobId = useRef(null);
   const jobTimeoutRef = useRef(null);
   const reconnectAttempts = useRef(0);
@@ -228,7 +229,7 @@ export const WebSocketProvider = ({ children }) => {
 
 
   // ===== connect logic with token fetch and event handlers =====
-  const connectWebSocket = async () => {
+const connectWebSocket = async (isVerifiedStatus) => {
     // prevent duplicate connects
     if (socketRef.current && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socketRef.current.readyState)) {
       console.log("[WS] socket already active; skipping connect.");
@@ -240,10 +241,8 @@ export const WebSocketProvider = ({ children }) => {
       return;
     }
 
-    if (!isVerified) {
-      console.log("[WS] User not verified; skipping connect.");
-      return;
-    }
+   if (!isVerifiedStatus) {
+      console.log("[WS] User not verified; skipping connect.");}
     // if WS fails to connect within 10 seconds, mark offline
     setTimeout(async () => {
       if (socketRef.current && socketRef.current.readyState !== WebSocket.OPEN) {
@@ -480,7 +479,8 @@ export const WebSocketProvider = ({ children }) => {
         }
 
         // If the user intends to stay online, attempt reconnect
-        if (intendedOnlineState.current) {
+        // If user intends to be online OR is currently working on a job, attempt reconnect
+        if (intendedOnlineState.current || basicNeeds?.status === 'WORKING') {
           reconnectAttempts.current += 1;
 
           if (reconnectAttempts.current <= maxReconnectAttempts) {
@@ -516,7 +516,7 @@ export const WebSocketProvider = ({ children }) => {
   const ensureSocketConnected = async () => {
     try {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) return;
-      await connectWebSocket();
+await connectWebSocket(data.is_verified);
     } catch (err) {
       console.error("[WS] ensureSocketConnected error:", err);
     }
@@ -570,28 +570,45 @@ export const WebSocketProvider = ({ children }) => {
   useEffect(() => {
     (async () => {
       const data = await fetchInitialStatus();
+      // 2. NEW: Sync with the server to check for an active job
+      try {
+        const syncRes = await api.get("/jobs/SyncActiveJob/");
+        const activeJob = syncRes.data;
 
-      // restore accepted job if persisted and server doesn't say ONLINE
-      const storedJob = localStorage.getItem('acceptedJob');
-      if (storedJob) {
-        try {
-          const parsed = JSON.parse(storedJob);
-          if (parsed && data?.status !== 'ONLINE') {
-            setJob(parsed);
-            jobRef.current = parsed;
-            setBasicNeeds(prev => ({ ...prev, status: "WORKING" }));
-            intendedOnlineState.current = true;
-            setIsOnlineState(true);
-          } else {
-            // if server thinks ONLINE, clear persisted accepted job to avoid dupes
-            localStorage.removeItem('acceptedJob');
-          }
-        } catch (err) { /* ignore parse errors */ }
+        if (activeJob && activeJob.id) {
+          // Server confirms a job is active. This is the source of truth.
+          console.log("[WS] Synced active job from server:", activeJob.id);
+          setJob(activeJob);
+          jobRef.current = activeJob;
+          localStorage.setItem("acceptedJob", JSON.stringify(activeJob));
+
+          // Ensure context state reflects "WORKING"
+          setBasicNeeds(prev => ({ ...prev, status: "WORKING" }));
+          intendedOnlineState.current = true; // We need to be "online" to work
+          setIsOnlineState(true);
+        } else {
+          // Server says NO job is active. Clear any stale local job.
+          console.log("[WS] No active job found on server. Clearing local.");
+          localStorage.removeItem('acceptedJob');
+          setJob(null);
+          jobRef.current = null;
+        }
+      } catch (err) {
+        // An error (like a 404) also means NO active job.
+        if (!err.response || (err.response && err.response.status !== 404)) {
+          console.warn("[WS] SyncActiveJob call failed:", err);
+        } else {
+          console.log("[WS] No active job found on server. Clearing local.");
+        }
+
+        // It's safe to clear local job if sync fails or 404s
+        localStorage.removeItem('acceptedJob');
+        setJob(null);
+        jobRef.current = null;
       }
 
-      // connect if user is verified + intended online
       if (data?.is_verified && intendedOnlineState.current) {
-        await connectWebSocket();
+        await connectWebSocket(); //
       }
     })();
 
@@ -743,8 +760,6 @@ export const WebSocketProvider = ({ children }) => {
       console.log(`[JOB] Accepting job #${jobRef.current.id}...`);
       const res = await api.post(`/jobs/AcceptServiceRequest/${jobRef.current.id}/`);
       const acceptedJob = res.data?.job || jobRef.current;
-
-      intendedOnlineState.current = false;
       setIsOnlineState(false);
 
       // update status to WORKING on server
@@ -876,7 +891,7 @@ export const WebSocketProvider = ({ children }) => {
     try {
       await updateStatus(newIsOnline ? 'ONLINE' : 'OFFLINE');
       if (newIsOnline) {
-        await connectWebSocket();
+        await connectWebSocket(isVerified);
       } else {
         disconnectWebSocket();
       }
@@ -902,15 +917,6 @@ export const WebSocketProvider = ({ children }) => {
     return () => api.interceptors.response.eject(interceptor);
   }, [navigate]);
 
-  // Clear acceptedJob when server says ONLINE (we don't need persisted accepted job)
-  useEffect(() => {
-    if (basicNeeds?.status === 'ONLINE') {
-      localStorage.removeItem('acceptedJob');
-      setJob(null);
-      jobRef.current = null;
-      console.log("[WS] server status ONLINE — cleared acceptedJob");
-    }
-  }, [basicNeeds?.status]);
 
   // UI: local reject handler (no server call — UI only)
   const handleRejectJob = () => {
