@@ -14,7 +14,7 @@ export default defineConfig({
     proxy: {
       '/api': {
         // ✅ CORRECTED: Point to your actual backend server
-        target: 'https://mechanic-setu.onrender.com', 
+        target: 'https://mechanic-setu-int0.onrender.com', 
         changeOrigin: true,
         secure: true,
       },
